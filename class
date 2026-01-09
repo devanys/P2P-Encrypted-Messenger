@@ -1,0 +1,86 @@
+class LocalDiscovery:
+    def __init__(self, username, port, callback):
+        self.username = username
+        self.port = port
+        self.callback = callback
+        self.running = False
+        self.peers = {}  # {username: {ip, port, last_seen}}
+        self.sock = None
+        
+    def start(self):
+        self.running = True
+        
+        broadcast_thread = threading.Thread(target=self.broadcast_presence, daemon=True)
+        broadcast_thread.start()
+        
+        listen_thread = threading.Thread(target=self.listen_for_peers, daemon=True)
+        listen_thread.start()
+    
+    def broadcast_presence(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        
+        while self.running:
+            try:
+                message = json.dumps({
+                    'type': 'presence',
+                    'username': self.username,
+                    'port': self.port
+                })
+                sock.sendto(message.encode(), ('<broadcast>', DISCOVERY_PORT))
+            except Exception as e:
+                pass
+            time.sleep(BROADCAST_INTERVAL)
+        
+        sock.close()
+    
+    def listen_for_peers(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        try:
+            self.sock.bind(('', DISCOVERY_PORT))
+        except:
+            # Port sudah digunakan, skip listening
+            return
+        
+        self.sock.settimeout(1.0)
+        
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(1024)
+                message = json.loads(data.decode())
+                
+                if message['type'] == 'presence':
+                    peer_username = message['username']
+                    peer_port = message['port']
+                    peer_ip = addr[0]
+                    
+                    # Jangan tambahkan diri sendiri
+                    if peer_username != self.username:
+                        self.peers[peer_username] = {
+                            'ip': peer_ip,
+                            'port': peer_port,
+                            'last_seen': time.time()
+                        }
+                        self.callback(f"[DISCOVERY] Found peer: @{peer_username} at {peer_ip}:{peer_port}")
+            except socket.timeout:
+                continue
+            except Exception as e:
+                pass
+        
+        if self.sock:
+            self.sock.close()
+    
+    def find_peer(self, username):
+        # Clean old peers (older than 30 seconds)
+        current_time = time.time()
+        self.peers = {u: p for u, p in self.peers.items() 
+                     if current_time - p['last_seen'] < 30}
+        
+        if username in self.peers:
+            return self.peers[username]
+        return None
+    
+    def stop(self):
+        self.running = False
